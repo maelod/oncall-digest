@@ -1295,88 +1295,68 @@ const sendSlackDMStep = createStep({
         console.log(`💬 [send-slack-dm] Recipient: ${inputData.recipientSlackId} (${inputData.recipientName})`);
         console.log(`💬 [send-slack-dm] Digest length: ${inputData.digestContent.length} chars`);
 
-        // Try to find the Slack DM tool directly in MCP tools
-        const slackDmToolName = Object.keys(mcpTools).find(
-            k => k.toLowerCase().includes('slack') && k.toLowerCase().includes('direct_message'),
-        );
-        const slackSendToolName = Object.keys(mcpTools).find(
-            k => k.toLowerCase().includes('slack') && k.toLowerCase().includes('send') && !k.toLowerCase().includes('direct'),
-        );
+        const agent = mastra.getAgent('oncallDigestAgent');
+        let recipientId = inputData.recipientSlackId;
 
-        console.log(`💬 [send-slack-dm] Available Slack tools: ${Object.keys(mcpTools).filter(k => k.toLowerCase().includes('slack')).join(', ')}`);
-        console.log(`💬 [send-slack-dm] DM tool: ${slackDmToolName || 'not found'}`);
-        console.log(`💬 [send-slack-dm] Send tool: ${slackSendToolName || 'not found'}`);
+        // Step 1: If the recipient isn't a Slack user ID (U...), resolve it first
+        if (!recipientId.match(/^U[A-Z0-9]+$/)) {
+            console.log(`💬 [send-slack-dm] "${recipientId}" is not a Slack user ID, resolving...`);
+            const resolvePrompt = `Use the zapier_slack_find_user tool to find the Slack user ID for "${inputData.recipientName || recipientId}".
 
-        // Attempt 1: Direct MCP tool call (fastest, most reliable)
-        const dmTool = slackDmToolName ? mcpTools[slackDmToolName] : null;
-        if (dmTool?.execute) {
+Search by name: "${inputData.recipientName || recipientId}"
+
+Reply with ONLY the Slack user ID (starts with U, like U082HNT8BQR). Nothing else.`;
+
             try {
-                console.log(`💬 [send-slack-dm] Calling ${slackDmToolName} directly...`);
-                const result = await dmTool.execute({
-                    user: inputData.recipientSlackId,
-                    message: inputData.digestContent,
-                    text: inputData.digestContent,
-                    channel: inputData.recipientSlackId,
-                }, {} as any);
-
-                console.log(`💬 [send-slack-dm] Direct tool result:`, JSON.stringify(result).slice(0, 500));
-
-                // Check if result indicates success
-                const resultStr = JSON.stringify(result);
-                if (resultStr.includes('error') || resultStr.includes('invalid') || resultStr.includes('not_found')) {
-                    console.error(`💬 [send-slack-dm] Direct tool returned error: ${resultStr.slice(0, 300)}`);
+                const {text} = await agent.generate([{role: 'user', content: resolvePrompt}]);
+                const idMatch = text.match(/U[A-Z0-9]{8,}/);
+                if (idMatch) {
+                    recipientId = idMatch[0];
+                    console.log(`💬 [send-slack-dm] Resolved to Slack ID: ${recipientId}`);
                 } else {
-                    return {
-                        success: true,
-                        message: `Sent via direct tool to ${inputData.recipientSlackId}`,
-                        recipientSlackId: inputData.recipientSlackId,
-                    };
+                    console.error(`💬 [send-slack-dm] Could not resolve user. Agent said: ${text.slice(0, 200)}`);
                 }
             } catch (e) {
-                console.error(`💬 [send-slack-dm] Direct tool call failed:`, e);
+                console.error(`💬 [send-slack-dm] User resolution failed:`, e);
             }
         }
 
-        // Attempt 2: Fall back to agent-based approach with better prompting
-        console.log('💬 [send-slack-dm] Falling back to agent-based approach...');
-        const agent = mastra.getAgent('oncallDigestAgent');
+        // Step 2: Send the DM via agent with explicit instructions to avoid post_at issues
+        console.log(`💬 [send-slack-dm] Sending DM to ${recipientId}...`);
 
-        const prompt = `You MUST use a Slack tool to send a direct message. This is critical — do NOT just describe what you would do, actually call the tool.
+        const sendPrompt = `Send a Slack direct message using the zapier_slack_send_direct_message tool.
 
-Available Slack tools: ${Object.keys(mcpTools).filter(k => k.toLowerCase().includes('slack')).join(', ')}
+CRITICAL INSTRUCTIONS:
+- Set the "user" parameter to exactly: ${recipientId}
+- Set the "message" parameter to the digest content below
+- Do NOT set "post_at" — leave it out entirely, do not pass empty string or null
+- Do NOT set any optional parameters — only "user" and "message"
 
-Send a direct message to user "${inputData.recipientSlackId}" with the following content.
-Try the tool with these parameter variations:
-- user/channel: "${inputData.recipientSlackId}"
-- message/text: The digest content below
-
-DIGEST TO SEND:
+MESSAGE TO SEND:
 ${inputData.digestContent}
 
-After calling the tool, report the EXACT result. Did it succeed or fail? Include any error messages.`;
+Call the tool NOW. After calling it, tell me if it succeeded or failed.`;
 
         try {
-            const {text} = await agent.generate([{role: 'user', content: prompt}]);
+            const {text} = await agent.generate([{role: 'user', content: sendPrompt}]);
             console.log('💬 [send-slack-dm] Agent response:', text.slice(0, 500));
 
-            // More specific success detection — avoid matching generic word "message"
-            const hasError = /error|failed|couldn't|unable|not found|invalid/i.test(text);
-            const hasSuccess = /sent successfully|delivered|message sent|DM sent/i.test(text);
-            const success = hasSuccess && !hasError;
+            const hasError = /error|failed|couldn't|unable|not_found|invalid|validation/i.test(text);
+            const hasSuccess = /sent|delivered|success/i.test(text) && !hasError;
 
             return {
-                success,
-                message: success
-                    ? `Sent to ${inputData.recipientSlackId}`
-                    : `May have failed. Agent response: ${text.slice(0, 300)}`,
-                recipientSlackId: inputData.recipientSlackId,
+                success: hasSuccess,
+                message: hasSuccess
+                    ? `Sent to ${recipientId}`
+                    : `May have failed. Agent said: ${text.slice(0, 300)}`,
+                recipientSlackId: recipientId,
             };
         } catch (e) {
             console.error('💬 [send-slack-dm] Agent error:', e);
             return {
                 success: false,
                 message: `Failed: ${e}`,
-                recipientSlackId: inputData.recipientSlackId,
+                recipientSlackId: recipientId,
             };
         }
     },
