@@ -1,6 +1,7 @@
 import {createStep, createWorkflow} from '@mastra/core/workflows';
 import {z} from 'zod';
 import {mcpTools} from '../agents/oncall-digest-agent';
+import {getGrommerceOnCall} from '../utils/rootly-api';
 
 // Growth team services for filtering
 const GROWTH_SERVICES = [
@@ -60,78 +61,65 @@ function getDateContext() {
 // PARALLEL DATA GATHERING STEPS (all take workflow input, run concurrently)
 // ============================================================================
 
-// Step: Get Rootly on-call schedule (also passes through recipient info)
+// Step: Get Rootly on-call schedule via direct API (also passes through recipient info)
 const getRootlyScheduleStep = createStep({
     id: 'get-rootly-schedule',
-    description: 'Gets on-call schedule from Rootly for Grommerce team',
+    description: 'Gets on-call schedule from Rootly API for Grommerce team',
     inputSchema: workflowInputSchema,
     outputSchema: z.object({
         recipientSlackId: z.string(),
         recipientName: z.string(),
         primary: z.string(),
+        primarySlackId: z.string(),
+        primaryDisplayName: z.string(),
         secondary: z.string(),
-        previous: z.string(),
+        secondarySlackId: z.string(),
+        secondaryDisplayName: z.string(),
         shiftStart: z.string(),
         shiftEnd: z.string(),
         previousShiftStart: z.string(),
         previousShiftEnd: z.string(),
     }),
-    execute: async ({inputData, mastra}) => {
-        console.log('📅 [Parallel] Getting Rootly on-call schedule...');
+    execute: async ({inputData}) => {
+        console.log('📅 [Parallel] Getting Rootly on-call schedule via direct API...');
         const dates = getDateContext();
-        const agent = mastra.getAgent('oncallDigestAgent');
-
-        const prompt = `Use the Rootly on-call schedule tool (via Zapier) to find who is on-call for the Growth team.
-
-IMPORTANT CONTEXT:
-- The Growth team's on-call schedules in Rootly are under the "Growth" team
-- The exact schedule names are: "Grommerce Team Primary" and "Grommerce Team Secondary"
-- On-call shifts run Tuesday to Tuesday
-- Today is ${dates.today}
-- Current shift started: ${dates.currentShiftStart} (Tuesday)
-- Current shift ends: ${dates.currentShiftEnd} (next Tuesday)
-- Previous shift was: ${dates.previousShiftStart} to ${dates.previousShiftEnd}
-
-TOOL USAGE:
-1. First, search for the schedule named EXACTLY "Grommerce Team Primary" under the Growth team
-2. Then, search for the schedule named EXACTLY "Grommerce Team Secondary" under the Growth team
-You may need to call the tool multiple times: once for each schedule.
-Try searching by the exact schedule name. If that doesn't work, try listing all schedules and filtering for "Grommerce".
-
-I need exactly 3 pieces of information:
-1. (Primary): Who is on-call for the CURRENT shift (${dates.currentShiftStart} to ${dates.currentShiftEnd}) for the "Grommerce Team Primary" schedule?
-2. (Secondary): Who is on-call for the CURRENT shift for the "Grommerce Team Secondary" schedule?
-3. (Previous): Who was on-call for the PREVIOUS shift (${dates.previousShiftStart} to ${dates.previousShiftEnd}) for the "Grommerce Team Primary" schedule?
-
-Reply with ONLY a JSON object in this exact format:
-{"primary": "@username", "secondary": "@username", "previous": "@username"}
-
-If you cannot find the information, use "@unknown" for that field.`;
 
         try {
-            const {text} = await agent.generate([{role: 'user', content: prompt}]);
-            const match = text.match(/\{[^}]+\}/);
-            const data = match ? JSON.parse(match[0]) : {};
+            const onCall = await getGrommerceOnCall();
+
+            const primaryName = onCall.primary?.name || 'unknown';
+            const primarySlackId = onCall.primary?.slackId || '';
+            const primaryMention = primarySlackId ? `<@${primarySlackId}>` : `@${primaryName}`;
+
+            const secondaryName = onCall.secondary?.name || 'unknown';
+            const secondarySlackId = onCall.secondary?.slackId || '';
+            const secondaryMention = secondarySlackId ? `<@${secondarySlackId}>` : `@${secondaryName}`;
 
             return {
                 recipientSlackId: inputData.recipientSlackId,
                 recipientName: inputData.recipientName,
-                primary: data.primary || '@unknown',
-                secondary: data.secondary || '@unknown',
-                previous: data.previous || '@unknown',
+                primary: primaryMention,
+                primarySlackId,
+                primaryDisplayName: primaryName,
+                secondary: secondaryMention,
+                secondarySlackId,
+                secondaryDisplayName: secondaryName,
                 shiftStart: dates.currentShiftStart,
                 shiftEnd: dates.currentShiftEnd,
                 previousShiftStart: dates.previousShiftStart,
                 previousShiftEnd: dates.previousShiftEnd,
             };
         } catch (e) {
-            console.error('Rootly schedule error:', e);
+            console.error('Rootly API error:', e);
             return {
                 recipientSlackId: inputData.recipientSlackId,
                 recipientName: inputData.recipientName,
                 primary: '@unknown',
+                primarySlackId: '',
+                primaryDisplayName: 'unknown',
                 secondary: '@unknown',
-                previous: '@unknown',
+                secondarySlackId: '',
+                secondaryDisplayName: 'unknown',
                 shiftStart: dates.currentShiftStart,
                 shiftEnd: dates.currentShiftEnd,
                 previousShiftStart: dates.previousShiftStart,
@@ -595,8 +583,11 @@ const combineParallelResultsStep = createStep({
             recipientSlackId: z.string(),
             recipientName: z.string(),
             primary: z.string(),
+            primarySlackId: z.string(),
+            primaryDisplayName: z.string(),
             secondary: z.string(),
-            previous: z.string(),
+            secondarySlackId: z.string(),
+            secondaryDisplayName: z.string(),
             shiftStart: z.string(),
             shiftEnd: z.string(),
             previousShiftStart: z.string(),
@@ -629,8 +620,9 @@ const combineParallelResultsStep = createStep({
         recipientSlackId: z.string(),
         recipientName: z.string(),
         primary: z.string(),
+        primaryDisplayName: z.string(),
         secondary: z.string(),
-        previous: z.string(),
+        secondaryDisplayName: z.string(),
         shiftStart: z.string(),
         shiftEnd: z.string(),
         previousShiftStart: z.string(),
@@ -662,10 +654,11 @@ const combineParallelResultsStep = createStep({
             // Recipient info from Rootly schedule step
             recipientSlackId: schedule.recipientSlackId,
             recipientName: schedule.recipientName,
-            // Rootly schedule
+            // Rootly schedule (Slack mentions already resolved via direct API)
             primary: schedule.primary,
+            primaryDisplayName: schedule.primaryDisplayName,
             secondary: schedule.secondary,
-            previous: schedule.previous,
+            secondaryDisplayName: schedule.secondaryDisplayName,
             shiftStart: schedule.shiftStart,
             shiftEnd: schedule.shiftEnd,
             previousShiftStart: schedule.previousShiftStart,
@@ -700,8 +693,9 @@ const combinedDataSchema = z.object({
     recipientSlackId: z.string(),
     recipientName: z.string(),
     primary: z.string(),
+    primaryDisplayName: z.string(),
     secondary: z.string(),
-    previous: z.string(),
+    secondaryDisplayName: z.string(),
     shiftStart: z.string(),
     shiftEnd: z.string(),
     previousShiftStart: z.string(),
@@ -722,28 +716,20 @@ const combinedDataSchema = z.object({
 
 const resolveSlackUserIdsStep = createStep({
     id: 'resolve-slack-users',
-    description: 'Resolves Rootly @usernames to Slack user IDs for real @mentions',
+    description: 'Resolves incident @usernames to Slack user IDs for real @mentions',
     inputSchema: combinedDataSchema,
     outputSchema: combinedDataSchema.extend({
-        primaryDisplayName: z.string(),
-        secondaryDisplayName: z.string(),
-        previousDisplayName: z.string(),
         userMap: z.string(),
     }),
     execute: async ({inputData, mastra}) => {
         console.log('👤 [resolve-slack-users] Starting...');
         const agent = mastra.getAgent('oncallDigestAgent');
 
-        // Collect unique usernames from on-call fields and incident involved arrays
+        // On-call people already have Slack IDs from the Rootly API.
+        // Only resolve usernames from incident involved arrays.
         const usernames = new Set<string>();
         const cleanUsername = (name: string) => name.replace(/^@/, '').trim();
 
-        for (const field of [inputData.primary, inputData.secondary, inputData.previous]) {
-            const cleaned = cleanUsername(field);
-            if (cleaned && cleaned !== 'unknown') usernames.add(cleaned);
-        }
-
-        // Also collect usernames from incident involved arrays
         let incidents = [];
         try {
             incidents = JSON.parse(inputData.incidents);
@@ -755,7 +741,6 @@ const resolveSlackUserIdsStep = createStep({
                     if (cleaned && cleaned !== 'unknown') usernames.add(cleaned);
                 }
             }
-            // Also check action item owners
             if (Array.isArray(inc.actionItems)) {
                 for (const item of inc.actionItems) {
                     if (item.owner) {
@@ -767,14 +752,11 @@ const resolveSlackUserIdsStep = createStep({
         }
 
         const uniqueUsers = Array.from(usernames);
-        console.log(`👤 [resolve-slack-users] Resolving ${uniqueUsers.length} users: ${uniqueUsers.join(', ')}`);
+        console.log(`👤 [resolve-slack-users] Resolving ${uniqueUsers.length} incident users: ${uniqueUsers.join(', ')}`);
 
         if (uniqueUsers.length === 0) {
             return {
                 ...inputData,
-                primaryDisplayName: inputData.primary,
-                secondaryDisplayName: inputData.secondary,
-                previousDisplayName: inputData.previous,
                 userMap: '{}',
             };
         }
@@ -802,28 +784,8 @@ If you cannot find a user, use null for their value.`;
             console.error('👤 [resolve-slack-users] Error resolving users:', e);
         }
 
-        // Build Slack mention strings, falling back to original @username
-        const toMention = (field: string) => {
-            const cleaned = cleanUsername(field);
-            const slackId = userMap[cleaned];
-            return slackId ? `<@${slackId}>` : field;
-        };
-
-        // Preserve display names (the original Rootly names)
-        const primaryDisplayName = inputData.primary;
-        const secondaryDisplayName = inputData.secondary;
-        const previousDisplayName = inputData.previous;
-
-        console.log(`👤 [resolve-slack-users] Resolved: primary=${toMention(inputData.primary)}, secondary=${toMention(inputData.secondary)}, previous=${toMention(inputData.previous)}`);
-
         return {
             ...inputData,
-            primary: toMention(inputData.primary),
-            secondary: toMention(inputData.secondary),
-            previous: toMention(inputData.previous),
-            primaryDisplayName,
-            secondaryDisplayName,
-            previousDisplayName,
             userMap: JSON.stringify(userMap),
         };
     },
@@ -834,9 +796,6 @@ If you cannot find a user, use null for their value.`;
 // ============================================================================
 
 const resolvedDataSchema = combinedDataSchema.extend({
-    primaryDisplayName: z.string(),
-    secondaryDisplayName: z.string(),
-    previousDisplayName: z.string(),
     userMap: z.string(),
 });
 
@@ -1162,7 +1121,7 @@ DATE CONTEXT:
 ON-CALL:
 - Primary: ${inputData.primary} (${inputData.primaryDisplayName})
 - Secondary: ${inputData.secondary} (${inputData.secondaryDisplayName})
-- Previous: ${inputData.previous} (${inputData.previousDisplayName})
+- Previous: Check the previous handoff notes below for who was on-call last week
 
 PREVIOUS HANDOFF NOTES:
 ${inputData.previousHandoffNotes || 'None available'}
@@ -1186,7 +1145,7 @@ Use plain text descriptions (like the example below), NOT bullet-point lists of 
 
 ---
 *ON-CALL HANDOFF* | Growth Team | ${inputData.shiftStart} - ${inputData.shiftEnd}
-${inputData.primary} (secondary: ${inputData.secondary}) | Previous: ${inputData.previous}
+${inputData.primary} (secondary: ${inputData.secondary})
 ---
 
 *Alerts/Pages*
@@ -1394,7 +1353,7 @@ export const oncallDigestWorkflow = createWorkflow({
     ])
     // Combine parallel results
     .then(combineParallelResultsStep)
-    // Resolve Rootly usernames to Slack user IDs
+    // Resolve incident @usernames to Slack user IDs
     .then(resolveSlackUserIdsStep)
     // Verify PRs in GitHub (sequential - needs PR candidates from combine)
     .then(verifyPRsInGitHubStep)
