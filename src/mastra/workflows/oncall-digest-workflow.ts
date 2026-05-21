@@ -17,9 +17,11 @@ const GROWTH_SLACK_CHANNELS = [
 ];
 
 // Input schema for the workflow
+// recipientSlackId/recipientName are optional — if omitted, the digest is sent
+// to the incoming primary on-call person (resolved automatically from Rootly).
 const workflowInputSchema = z.object({
-    recipientSlackId: z.string().describe('Slack user ID or handle to send the digest to'),
-    recipientName: z.string().describe('Name of the recipient'),
+    recipientSlackId: z.string().optional().describe('Slack user ID to send the digest to (optional — defaults to incoming primary on-call)'),
+    recipientName: z.string().optional().describe('Name of the recipient (optional — defaults to incoming primary on-call)'),
 });
 
 // Helper to get date strings with Tuesday-based shifts
@@ -95,9 +97,14 @@ const getRootlyScheduleStep = createStep({
             const secondarySlackId = onCall.secondary?.slackId || '';
             const secondaryMention = secondarySlackId ? `<@${secondarySlackId}>` : `@${secondaryName}`;
 
+            // Default recipient to the incoming primary on-call person
+            const recipientSlackId = inputData.recipientSlackId || primarySlackId || primaryName;
+            const recipientName = inputData.recipientName || primaryName;
+            console.log(`📅 [get-rootly-schedule] Recipient: ${recipientName} (${recipientSlackId})`);
+
             return {
-                recipientSlackId: inputData.recipientSlackId,
-                recipientName: inputData.recipientName,
+                recipientSlackId,
+                recipientName,
                 primary: primaryMention,
                 primarySlackId,
                 primaryDisplayName: primaryName,
@@ -112,8 +119,8 @@ const getRootlyScheduleStep = createStep({
         } catch (e) {
             console.error('Rootly API error:', e);
             return {
-                recipientSlackId: inputData.recipientSlackId,
-                recipientName: inputData.recipientName,
+                recipientSlackId: inputData.recipientSlackId || '',
+                recipientName: inputData.recipientName || 'unknown',
                 primary: '@unknown',
                 primarySlackId: '',
                 primaryDisplayName: 'unknown',
@@ -1298,8 +1305,8 @@ const sendSlackDMStep = createStep({
         const agent = mastra.getAgent('oncallDigestAgent');
         let recipientId = inputData.recipientSlackId;
 
-        // Step 1: If the recipient isn't a Slack user ID (U...), resolve it first
-        if (!recipientId.match(/^U[A-Z0-9]+$/)) {
+        // Step 1: If the recipient isn't a Slack user ID (U...), resolve it via Slack search
+        if (!recipientId || !recipientId.match(/^U[A-Z0-9]+$/)) {
             console.log(`💬 [send-slack-dm] "${recipientId}" is not a Slack user ID, resolving...`);
             const resolvePrompt = `Use the zapier_slack_find_user tool to find the Slack user ID for "${inputData.recipientName || recipientId}".
 
