@@ -1,7 +1,9 @@
 import {createStep, createWorkflow} from '@mastra/core/workflows';
 import {z} from 'zod';
 import {mcpTools} from '../agents/oncall-digest-agent';
-import {getGrommerceOnCall} from '../utils/rootly-api';
+import {getGrommerceOnCall, getRecentIncidents} from '../utils/rootly-api';
+import {verifyPRs} from '../utils/github-api';
+import {createHandoffNote} from '../utils/slite-api';
 
 // Growth team services for filtering
 const GROWTH_SERVICES = [
@@ -817,84 +819,34 @@ const resolvedDataSchema = combinedDataSchema.extend({
 
 const verifyPRsInGitHubStep = createStep({
     id: 'verify-prs-github',
-    description: 'Checks each PR candidate in GitHub to see if it needs review',
+    description: 'Checks each PR candidate via gh CLI to see if it needs review',
     inputSchema: resolvedDataSchema,
     outputSchema: resolvedDataSchema.omit({prCandidates: true}).extend({
         prReviews: z.string(), // Verified PRs that still need review
     }),
-    execute: async ({inputData, mastra}) => {
-        console.log('🔍 Verifying PRs in GitHub...');
-        const agent = mastra.getAgent('oncallDigestAgent');
+    execute: async ({inputData}) => {
+        console.log('🔍 Verifying PRs via gh CLI...');
 
-        // Parse PR candidates
         let prCandidates = [];
         try {
             prCandidates = JSON.parse(inputData.prCandidates);
         } catch {
         }
 
-        // If no PRs to check, skip
         if (prCandidates.length === 0) {
             console.log('   No PR candidates to verify');
             const {prCandidates: _, ...rest} = inputData;
-            return {
-                ...rest,
-                prReviews: '[]',
-            };
+            return {...rest, prReviews: '[]'};
         }
 
-        const prUrls = prCandidates.map((p: any) => p.prUrl).filter(Boolean);
+        // Use gh CLI directly — no agent, no Zapier
+        const verified = verifyPRs(prCandidates);
 
-        const prompt = `Check these GitHub PRs to see if they still need review from the Growth team:
-
-PR URLs to check:
-${prUrls.map((url: string, i: number) => `${i + 1}. ${url}`).join('\n')}
-
-PR Details from Slack:
-${JSON.stringify(prCandidates, null, 2)}
-
-For EACH PR, use GitHub tools via Zapier to check:
-1. Is the PR still open? (not merged or closed)
-2. Has it been approved?
-3. Are there review comments from Growth team members?
-4. What is the current review status?
-
-Return ONLY PRs that:
-- Are still OPEN (not merged/closed)
-- Have NOT been approved yet
-- Do NOT have substantive review comments from Growth team
-
-Reply with ONLY a JSON array of PRs that STILL NEED REVIEW:
-[{
-  "prUrl": "https://github.com/...",
-  "from": "team/person who requested",
-  "channel": "where it was posted",
-  "postedDate": "YYYY-MM-DD",
-  "status": "open - needs review",
-  "reason": "why it still needs review"
-}]
-
-If ALL PRs have been reviewed/merged/closed, return: []`;
-
-        try {
-            const {text} = await agent.generate([{role: 'user', content: prompt}]);
-            const match = text.match(/\[[\s\S]*\]/);
-            const verifiedPRs = match ? match[0] : '[]';
-
-            const {prCandidates: _, ...rest} = inputData;
-            return {
-                ...rest,
-                prReviews: verifiedPRs,
-            };
-        } catch (e) {
-            console.error('GitHub PR verification error:', e);
-            // On error, return the candidates as-is (better to show potentially stale data than nothing)
-            const {prCandidates: _, ...rest} = inputData;
-            return {
-                ...rest,
-                prReviews: inputData.prCandidates,
-            };
-        }
+        const {prCandidates: _, ...rest} = inputData;
+        return {
+            ...rest,
+            prReviews: JSON.stringify(verified),
+        };
     },
 });
 
@@ -908,108 +860,50 @@ const verifiedDataSchema = resolvedDataSchema.omit({prCandidates: true}).extend(
 
 const getRootlyDetailsStep = createStep({
     id: 'get-rootly-details',
-    description: 'Enriches incidents with Rootly details (duration, action items, etc.)',
+    description: 'Fetches incidents directly from Rootly API with action items',
     inputSchema: verifiedDataSchema,
     outputSchema: verifiedDataSchema,
-    execute: async ({inputData, mastra}) => {
-        console.log('📋 Getting Rootly incident details...');
+    execute: async ({inputData}) => {
+        console.log('📋 Fetching incidents from Rootly API...');
         const dates = getDateContext();
-        const agent = mastra.getAgent('oncallDigestAgent');
 
-        // Parse existing incidents
-        let incidents: any[] = [];
-        try {
-            incidents = JSON.parse(inputData.incidents);
-        } catch {
-        }
-
-        // If no incidents, skip Rootly lookup
-        if (incidents.length === 0) {
-            console.log('   No incidents to enrich, skipping Rootly');
-            return inputData;
-        }
-
-        // Step 1: Call Rootly MCP tool directly for each incident (parallel, no LLM)
-        // Find the Rootly tool — name may vary across Zapier MCP versions
-        const rootlyToolName = Object.keys(mcpTools).find(k => k.toLowerCase().includes('rootly'));
-        const rootlyTool = rootlyToolName ? mcpTools[rootlyToolName] : null;
-        if (!rootlyTool?.execute) {
-            console.error(`📋 Rootly tool not found (available: ${Object.keys(mcpTools).filter(k => k.includes('rootly')).join(', ') || 'none'}), skipping enrichment`);
-            return inputData;
-        }
-
-        // Log the tool's input schema to understand expected params
-        console.log(`📋 Using tool: ${rootlyToolName}`);
-
-        console.log(`📋 Fetching ${incidents.length} incidents from Rootly directly (parallel)...`);
-        const rawResults = await Promise.all(
-            incidents.map(async (incident: any) => {
-                const slug = (incident.slug || '').replace(/^#/, '');
-                try {
-                    // Pass slug as the search/query parameter — Zapier Rootly actions
-                    // typically accept a search term or incident identifier
-                    const result = await rootlyTool.execute!({search: slug, slug, query: slug}, {} as any);
-                    console.log(`📋 Got Rootly data for ${slug}`);
-                    return {slug: incident.slug, rawData: result, original: incident};
-                } catch (e) {
-                    console.error(`📋 Rootly fetch failed for ${slug}:`, e);
-                    return {slug: incident.slug, rawData: null, original: incident};
-                }
-            }),
+        // Fetch incidents directly from Rootly API (no Zapier, no agent)
+        const rootlyIncidents = await getRecentIncidents(
+            `${dates.previousShiftStart}T00:00:00Z`,
+            `${dates.previousShiftEnd}T23:59:59Z`,
         );
 
-        // Step 2: Single LLM call to structure ALL raw Rootly data
-        const successfulResults = rawResults.filter(r => r.rawData != null);
-        if (successfulResults.length === 0) {
-            console.log('📋 No Rootly data retrieved, using original incidents');
+        if (rootlyIncidents.length === 0) {
+            console.log('📋 No incidents found from Rootly API');
             return inputData;
         }
 
-        const prompt = `Extract structured incident details from the raw Rootly API data below.
+        // Convert to the format expected by the generate step
+        const enrichedIncidents = rootlyIncidents.map(inc => ({
+            slug: `#${inc.slug}`,
+            channelId: inc.slackChannelId || '',
+            channelLink: inc.slackChannelId
+                ? `https://glossgenius.slack.com/archives/${inc.slackChannelId}`
+                : '',
+            rootlyUrl: inc.url,
+            severity: inc.severity || 'Unknown',
+            status: inc.status,
+            summary: inc.summary || inc.title,
+            actionItems: inc.actionItems.map(ai => ({
+                task: ai.summary,
+                status: ai.status === 'done' ? 'Done' : 'Pending',
+                owner: '',
+                dueDate: ai.dueAt || null,
+                priority: ai.priority,
+            })),
+            growthRelated: false, // Will be determined by the LLM in generate step
+            involved: [],
+            labels: inc.labels,
+            createdAt: inc.createdAt,
+        }));
 
-DATE CONTEXT:
-- Last shift: ${dates.previousShiftStart} to ${dates.previousShiftEnd}
-
-RAW ROOTLY DATA (one entry per incident):
-${rawResults.map(r => `--- ${r.slug} ---\n${r.rawData ? JSON.stringify(r.rawData) : 'NO DATA (use original below)'}\nOriginal: ${JSON.stringify(r.original)}`).join('\n\n')}
-
-For EACH incident, extract:
-1. Summary of what happened
-2. Duration (how long it lasted, or "ongoing")
-3. Root cause (if identified)
-4. Resolution summary
-5. ALL action items with status (Done/Pending) and owner — this is CRITICAL, especially for Growth-related incidents
-6. Slack channel ID and link (https://glossgenius.slack.com/archives/CHANNEL_ID)
-7. Rootly incident URL if available (https://glossgenius.rootly.com/incidents/...)
-8. Team members involved
-9. Whether this incident is Growth-related (involves Growth services or team members)
-
-Reply with ONLY a JSON array:
-[{
-  "slug": "#inc-...",
-  "channelId": "C12345678",
-  "channelLink": "https://glossgenius.slack.com/archives/C12345678",
-  "rootlyUrl": "https://glossgenius.rootly.com/incidents/...",
-  "severity": "SEV-X",
-  "status": "Resolved/Active",
-  "duration": "3h 15m",
-  "summary": "Brief summary",
-  "rootCause": "Why it happened (or null)",
-  "resolution": "How it was fixed (or null)",
-  "growthRelated": true,
-  "actionItems": [{"task": "description", "status": "Done/Pending", "owner": "@person", "dueDate": "YYYY-MM-DD or null"}],
-  "involved": ["@person1", "@person2"]
-}]`;
-
-        try {
-            const {text} = await agent.generate([{role: 'user', content: prompt}]);
-            const match = text.match(/\[[\s\S]*\]/);
-            const enrichedIncidents = match ? match[0] : inputData.incidents;
-            return {...inputData, incidents: enrichedIncidents};
-        } catch (e) {
-            console.error('📋 Rootly structuring error:', e);
-            return inputData;
-        }
+        console.log(`📋 Enriched ${enrichedIncidents.length} incidents from Rootly API`);
+        return {...inputData, incidents: JSON.stringify(enrichedIncidents)};
     },
 });
 
@@ -1248,7 +1142,7 @@ Generate the complete document now. Output ONLY the formatted text.`;
 
 const createSliteHandoffEntryStep = createStep({
     id: 'create-slite-handoff-entry',
-    description: 'Creates a new Slite doc entry in the Growth On-Call Handoff table',
+    description: 'Creates a new Slite doc via direct API under the Growth On-Call Handoff parent',
     inputSchema: z.object({
         recipientSlackId: z.string(),
         recipientName: z.string(),
@@ -1264,40 +1158,12 @@ const createSliteHandoffEntryStep = createStep({
         digestContent: z.string(),
         sliteDocUrl: z.string(),
     }),
-    execute: async ({inputData, mastra}) => {
-        console.log('📝 [create-slite-handoff] Creating Slite handoff entry...');
-        const agent = mastra.getAgent('oncallDigestAgent');
+    execute: async ({inputData}) => {
+        console.log('📝 [create-slite-handoff] Creating Slite handoff entry via direct API...');
 
-        const prompt = `Create a new Slite document for this on-call handoff and add it to the Growth On-Call Handoff table.
-
-HANDOFF TABLE DOC: https://glossgenius.slite.com/app/docs/hNke50mcj454f5/Growth-On-Call-Handoff
-
-Use the Slite tool (via Zapier) to create a new note/document with:
-- Title: "Growth On-Call Handoff ${inputData.previousShiftStart} to ${inputData.shiftEnd}"
-- Content: The digest below (formatted for Slite/markdown)
-- Parent/collection: Link it to the Growth On-Call Handoff doc if possible
-
-DIGEST CONTENT:
-${inputData.digestContent}
-
-After creating the doc, reply with ONLY a JSON object:
-{"sliteDocUrl": "https://glossgenius.slite.com/app/docs/..."}
-
-If creation fails, reply with:
-{"sliteDocUrl": ""}`;
-
-        let sliteDocUrl = '';
-        try {
-            const {text} = await agent.generate([{role: 'user', content: prompt}]);
-            const match = text.match(/\{[\s\S]*\}/);
-            if (match) {
-                const data = JSON.parse(match[0]);
-                sliteDocUrl = data.sliteDocUrl || '';
-            }
-            console.log(`📝 [create-slite-handoff] Created doc: ${sliteDocUrl || 'failed'}`);
-        } catch (e) {
-            console.error('📝 [create-slite-handoff] Error:', e);
-        }
+        const title = `Growth On-Call Handoff ${inputData.previousShiftStart} to ${inputData.shiftEnd}`;
+        // Use direct Slite API — no agent, no Zapier
+        const sliteDocUrl = await createHandoffNote(title, inputData.digestContent);
 
         return {
             recipientSlackId: inputData.recipientSlackId,
