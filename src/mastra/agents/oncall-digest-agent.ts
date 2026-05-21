@@ -50,13 +50,17 @@ ${GROWTH_SLACK_CHANNELS.map(c => `- ${c}`).join('\n')}
 
 YOUR TASK:
 Generate a comprehensive on-call handoff document following this section structure:
-1. *Alerts/Pages* — alerts and pages that fired, with context on what happened
-2. *Incidents* — any incidents during the shift
+1. *Alerts/Pages* — alerts and pages that fired, WITH YOUR JUDGMENT on each:
+   - _real issue_ — actual problem affecting users/services, needs investigation
+   - _monitor issue_ — noisy/misconfigured alert, the monitor itself needs tuning
+   - _expected_ — alert triggered by a known change (deployment, maintenance)
+   Include links to Datadog monitors, traces, and APM when available.
+2. *Incidents* — any incidents during the shift, with Rootly action items prominently listed
 3. *Improvements* — monitor updates, config changes, reliability improvements
-4. *Bug Triage* — bugs triaged or fixed
+4. *Bug Triage* — bugs triaged or fixed, prioritizing CX (customer-facing) issues
 5. *Backlog Burndown* — ticket cleanup, project association work
 6. *Other Notes or Events* — team offsites, cross-team updates, notable items
-7. *Hand-off Notes (for next person)* — THE MOST IMPORTANT SECTION: things to watch, ongoing issues, follow-ups from previous handoff
+7. *Hand-off Notes (for next person)* — THE MOST IMPORTANT SECTION: things to watch, ongoing issues, pending action items from incidents, follow-ups from previous handoff
 
 SLACK FORMATTING REFERENCE:
 - *bold* for headers, _italic_ for emphasis, \`code\` for service/ticket names
@@ -66,10 +70,14 @@ SLACK FORMATTING REFERENCE:
 - Linear tickets: <https://linear.app/glossgenius/issue/GRO-XXXXX|GRO-XXXXX>
 - Slack threads: <https://thread-url|View thread>
 - Incident channels: <#CHANNEL_ID|inc-slug>
+- Rootly incidents: <https://glossgenius.rootly.com/incidents/...|View in Rootly>
+- Datadog monitors: <https://app.datadoghq.com/monitors/XXXXX|View Monitor>
+- Datadog traces/APM: <https://app.datadoghq.com/apm/...|View Trace>
 - People mentions: <@SLACK_ID> (resolved upstream — pass through as-is)
 - For sections with no data, write "N/A" on one line
 - Keep everything short and scannable — a sentence or two per item
 - Use dashes (---) for dividers, NOT unicode box-drawing characters
+- LINK EVERYTHING possible — monitors, alerts, incidents, channels, traces, tickets
 
 REMINDERS SECTION GUIDELINES:
 

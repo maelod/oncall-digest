@@ -302,13 +302,14 @@ const getLinearTicketsStep = createStep({
 
         const agent = mastra.getAgent('oncallDigestAgent');
 
-        const prompt = `Search Linear for issues in the Growth team.
+        const prompt = `Search Linear for issues in the Growth team, with emphasis on customer-facing (CX) issues.
 
 TOOL: Use the Linear tool available via Zapier MCP to search for issues in the "Growth" team.
 
 SEARCH 1 - Pending tickets (not done):
 - Search for issues in the Growth team that are NOT completed/done
-- Focus on bugs, on-call work, and urgent items
+- PRIORITIZE customer-facing (CX) issues: bugs reported by users, issues affecting the client experience, customer-reported problems
+- Also include bugs, on-call work, and urgent items
 - EXCLUDE any tickets with "[TIMEBOX]" in the title (e.g., "[TIMEBOX] Growth On Call") — these are just story point placeholders
 
 SEARCH 2 - Recently resolved (optional, only if first search works):
@@ -324,9 +325,11 @@ For each ticket found, extract:
 - summary: the issue title/summary
 - status: current status
 - url: the Linear issue URL (e.g., "https://linear.app/glossgenius/issue/GRO-123")
+- isCx: true if this is a customer-facing/CX issue, false otherwise
+- labels: array of label names on the ticket (e.g., ["bug", "cx", "urgent"])
 
 YOUR FINAL OUTPUT MUST BE EXACTLY THIS FORMAT (no other text):
-{"pendingTickets": [{"ticket": "GRO-XXXXX", "summary": "...", "status": "To Do", "url": "https://linear.app/glossgenius/issue/GRO-XXXXX"}], "resolvedBugs": [{"ticket": "GRO-XXXXX", "summary": "...", "resolvedDate": "YYYY-MM-DD", "url": "https://linear.app/glossgenius/issue/GRO-XXXXX"}]}
+{"pendingTickets": [{"ticket": "GRO-XXXXX", "summary": "...", "status": "To Do", "url": "https://linear.app/glossgenius/issue/GRO-XXXXX", "isCx": true, "labels": ["bug", "cx"]}], "resolvedBugs": [{"ticket": "GRO-XXXXX", "summary": "...", "resolvedDate": "YYYY-MM-DD", "url": "https://linear.app/glossgenius/issue/GRO-XXXXX", "isCx": false, "labels": []}]}
 
 If no tickets found or tool calls fail, output exactly: {"pendingTickets": [], "resolvedBugs": []}`;
 
@@ -539,10 +542,16 @@ For each unique alert found, extract:
 - source: which tool it came from (Datadog, Eppo, or Hex)
 - count: how many times it fired during the shift
 - lastTriggered: date of most recent occurrence (YYYY-MM-DD)
-- suggestion: brief AI suggestion referencing relevant runbook section or action
+- monitorUrl: Datadog monitor URL if available (e.g., "https://app.datadoghq.com/monitors/XXXXX"), or empty string
+- traceUrl: Datadog APM trace/log URL if available from the alert message, or empty string
+- verdict: YOUR JUDGMENT — one of:
+  • "real_issue" — this alert indicates an actual problem affecting users or services (needs investigation/fix)
+  • "monitor_issue" — this alert is noisy, misconfigured, or overly sensitive (the monitor itself needs tuning, not the service)
+  • "expected" — this alert was expected due to a known change (deployment, maintenance, etc.)
+- verdictReason: one sentence explaining why you classified it this way
 
 YOUR FINAL OUTPUT MUST BE EXACTLY THIS FORMAT (no other text):
-{"alerts": [{"name": "alert name", "source": "Datadog", "count": 5, "lastTriggered": "2026-05-15", "suggestion": "Review relevant runbook section"}]}
+{"alerts": [{"name": "alert name", "source": "Datadog", "count": 5, "lastTriggered": "2026-05-15", "monitorUrl": "https://app.datadoghq.com/monitors/...", "traceUrl": "", "verdict": "monitor_issue", "verdictReason": "Fired 5 times but auto-resolved each time within minutes — likely too sensitive"}]}
 
 If no alerts found or tool calls fail, output exactly: {"alerts": []}`;
 
@@ -969,22 +978,26 @@ For EACH incident, extract:
 2. Duration (how long it lasted, or "ongoing")
 3. Root cause (if identified)
 4. Resolution summary
-5. Action items with status (Done/Pending) and owner
+5. ALL action items with status (Done/Pending) and owner — this is CRITICAL, especially for Growth-related incidents
 6. Slack channel ID and link (https://glossgenius.slack.com/archives/CHANNEL_ID)
-7. Team members involved
+7. Rootly incident URL if available (https://glossgenius.rootly.com/incidents/...)
+8. Team members involved
+9. Whether this incident is Growth-related (involves Growth services or team members)
 
 Reply with ONLY a JSON array:
 [{
   "slug": "#inc-...",
   "channelId": "C12345678",
   "channelLink": "https://glossgenius.slack.com/archives/C12345678",
+  "rootlyUrl": "https://glossgenius.rootly.com/incidents/...",
   "severity": "SEV-X",
   "status": "Resolved/Active",
   "duration": "3h 15m",
   "summary": "Brief summary",
   "rootCause": "Why it happened (or null)",
   "resolution": "How it was fixed (or null)",
-  "actionItems": [{"task": "description", "status": "Done/Pending", "owner": "@person"}],
+  "growthRelated": true,
+  "actionItems": [{"task": "description", "status": "Done/Pending", "owner": "@person", "dueDate": "YYYY-MM-DD or null"}],
   "involved": ["@person1", "@person2"]
 }]`;
 
@@ -1110,16 +1123,20 @@ const generateDigestStep = createStep({
 
         const prompt = `Generate a CONCISE on-call handoff document for Slack. Use *bold*, _italic_, and \`code\` formatting.
 
-HYPERLINK & FORMATTING RULES (CRITICAL — never output raw URLs):
+HYPERLINK & FORMATTING RULES (CRITICAL — link EVERYTHING, never output raw URLs):
 1. *PR links*: Format as \`<https://github.com/org/repo/pull/123|org/repo#123>\`
 2. *Linear tickets*: Format as \`<https://linear.app/glossgenius/issue/GRO-XXXXX|GRO-XXXXX>\` — construct URL from ticket identifier
 3. *Slack threads*: Format as \`<https://thread-url|View thread>\`
 4. *Incident channels*: Format as \`<#CHANNEL_ID|inc-slug>\` when channelId is available
-5. *People mentions*: Already formatted as \`<@SLACK_ID>\` — pass them through as-is, do NOT wrap in extra formatting
-6. Keep everything scannable — short descriptions, no long paragraphs
-7. Use \`backticks\` for alert/monitor names and technical terms
-8. NEVER output a bare URL — every URL must be inside \`<url|label>\` syntax
-9. For section dividers, use dashes (---) NOT unicode box-drawing characters
+5. *Rootly incidents*: Link to Rootly URL when available: \`<https://glossgenius.rootly.com/incidents/...|View in Rootly>\`
+6. *Datadog monitors*: Link to monitor URL when available: \`<https://app.datadoghq.com/monitors/...|View Monitor>\`
+7. *Datadog traces/APM*: Link to trace/APM URL when available: \`<https://app.datadoghq.com/apm/...|View Trace>\`
+8. *People mentions*: Already formatted as \`<@SLACK_ID>\` — pass them through as-is, do NOT wrap in extra formatting
+9. Keep everything scannable — short descriptions, no long paragraphs
+10. Use \`backticks\` for alert/monitor names and technical terms
+11. NEVER output a bare URL — every URL must be inside \`<url|label>\` syntax
+12. For section dividers, use dashes (---) NOT unicode box-drawing characters
+13. LINK AS MUCH AS POSSIBLE — monitors, alerts, incidents, channels, traces, tickets. If a URL is available in the data, it MUST appear as a hyperlink.
 
 DATE CONTEXT:
 - Current shift: ${inputData.shiftStart} to ${inputData.shiftEnd}
@@ -1158,19 +1175,26 @@ ${inputData.primary} (secondary: ${inputData.secondary})
 ---
 
 *Alerts/Pages*
-• \`Monitor Name Here\` (Datadog) — fired on [date], caused by [reason]. [What was done about it]
-• \`Another Monitor\` (Eppo) — [context and actions taken]
+For each alert, include your judgment: is this a real issue, a monitor issue, or expected?
+• \`Monitor Name Here\` (<monitor-url|View Monitor>) — _real issue_ — fired on [date], caused by [reason]. [What was done] (<trace-url|View Trace>)
+• \`Another Monitor\` (<monitor-url|View Monitor>) — _monitor issue (too sensitive)_ — fired N times, auto-resolved. Recommend tuning threshold.
+• \`Expected Alert\` — _expected_ — triggered by scheduled deployment
 
 *Incidents*
-• <#CHANNEL_ID|inc-slug> \`SEV-X\` — One-line summary of what happened and resolution
-  _Action items:_ [Pending] item description | [Done] item description
+Include Rootly action items prominently — especially for Growth-related incidents.
+• <#CHANNEL_ID|inc-slug> \`SEV-X\` — One-line summary (<rootly-url|View in Rootly>)
+  _Action items:_
+  [Pending] item description — owner
+  [Done] item description — owner
 
 *Improvements*
-• Updated \`monitor-name\` to be less sensitive
-• Created new latency monitor for [service]
+• Updated \`monitor-name\` to be less sensitive (<monitor-url|View Monitor>)
+• Created new latency monitor for [service] (<monitor-url|View Monitor>)
 
 *Bug Triage*
-• <linear-url|GRO-XXXXX> — Bug description (_status_)
+Prioritize CX (customer-facing) tickets. Tag them with _CX_ label.
+• <linear-url|GRO-XXXXX> — Bug description (_status_) _CX_
+• <linear-url|GRO-XXXXX> — Internal bug description (_status_)
 
 *Backlog Burndown*
 • Cleaned up N old tickets, associated them with projects
@@ -1182,17 +1206,21 @@ ${inputData.primary} (secondary: ${inputData.secondary})
 *Hand-off Notes (for next person)*
 • Watch out for [specific thing] — still ongoing from last week
 • [Item from previous handoff] — _resolved_ / _still ongoing_, here is the latest
+• Pending action items from incidents that need follow-up
 • [Any context the next person needs]
 
 FORMATTING RULES:
 • Start every item with a bullet point (•)
 • Use \`backticks\` for monitor names, service names, and technical terms
-• Use _italics_ for status labels and emphasis
+• Use _italics_ for status labels, verdicts, and emphasis
 • Use *bold* only for section headers
-• Every URL must be a Slack hyperlink: <url|label>
+• LINK EVERYTHING: monitors, traces, incidents, channels, tickets — if a URL exists in the data, make it a \`<url|label>\` hyperlink
 • Use dashes (---) for section dividers only
 • Keep each bullet to 1-2 sentences max — concise but informative
 • For "N/A" sections, just write "N/A" (no bullet needed)
+• For alerts: always include your verdict (_real issue_, _monitor issue_, or _expected_) with a brief reason
+• For tickets: tag CX-related tickets with _CX_ so they stand out
+• For incidents: always list action items (especially Pending ones) — these are critical for handoff
 
 Generate the complete document now. Output ONLY the formatted text.`;
 
