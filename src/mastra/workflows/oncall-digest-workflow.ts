@@ -1147,8 +1147,10 @@ DATA:
 - Runbook Updates: ${JSON.stringify(runbookUpdates)}
 - Incident Guidelines: ${JSON.stringify(incidentGuidelines)}
 
-OUTPUT FORMAT — Follow this exact section structure. For sections with no data, write "N/A" on one line.
-Use plain text descriptions (like the example below), NOT bullet-point lists of JSON fields.
+OUTPUT FORMAT — Follow this exact section structure. For sections with no data, write "N/A".
+Use bullet points (•) for each item within a section. Each bullet should be a concise sentence or two.
+
+Here is the EXACT format to follow:
 
 ---
 *ON-CALL HANDOFF* | Growth Team | ${inputData.shiftStart} - ${inputData.shiftEnd}
@@ -1156,40 +1158,41 @@ ${inputData.primary} (secondary: ${inputData.secondary})
 ---
 
 *Alerts/Pages*
-Describe each alert/page that fired during the shift with context about what happened and what was done about it.
-Include the monitor name in backticks, when it fired, and any actions taken.
-Example style:
-The \`Subscription Webhooks Endpoint is erroring at a high rate\` monitor in Datadog is very sensitive
-The \`Triggered: [Synthetics] Marketing Website: Get a free trial test\` monitor went off on Wednesday May 6th from a change to the marketing site.
+• \`Monitor Name Here\` (Datadog) — fired on [date], caused by [reason]. [What was done about it]
+• \`Another Monitor\` (Eppo) — [context and actions taken]
 
 *Incidents*
-List any incidents that occurred. If none, write "N/A".
+• <#CHANNEL_ID|inc-slug> \`SEV-X\` — One-line summary of what happened and resolution
+  _Action items:_ [Pending] item description | [Done] item description
 
 *Improvements*
-List any improvements made during the shift - monitor updates, new monitors created, config changes, etc.
+• Updated \`monitor-name\` to be less sensitive
+• Created new latency monitor for [service]
 
 *Bug Triage*
-List any bugs triaged or fixed. If none, write "N/A".
+• <linear-url|GRO-XXXXX> — Bug description (_status_)
 
 *Backlog Burndown*
-List any backlog cleanup work done (old tickets cleaned up, tickets associated with projects, etc.). If none, write "N/A".
+• Cleaned up N old tickets, associated them with projects
 
 *Other Notes or Events*
-Any other notable items - team offsites, ongoing work by other teams, etc. If none, write "N/A".
+• [Team] is at an offsite this week
+• Data team working on new dashboards
 
 *Hand-off Notes (for next person)*
-IMPORTANT: This is the most critical section. Include:
-- Anything the next on-call person should watch out for
-- Ongoing issues that need monitoring
-- Follow-ups from the previous handoff (reference PREVIOUS HANDOFF NOTES above and note status of items mentioned there)
-- Any context the next person needs to be effective
-If there are items from the previous handoff notes, explicitly mention whether they are resolved or still ongoing.
+• Watch out for [specific thing] — still ongoing from last week
+• [Item from previous handoff] — _resolved_ / _still ongoing_, here is the latest
+• [Any context the next person needs]
 
-IMPORTANT:
-- Keep descriptions concise but informative — a sentence or two per item, not single-word bullets
-- Every URL must be a Slack hyperlink: <url|label>
-- Use dashes (---) for dividers, NOT unicode characters like ═
-- Write in a natural, conversational tone (see the example format above)
+FORMATTING RULES:
+• Start every item with a bullet point (•)
+• Use \`backticks\` for monitor names, service names, and technical terms
+• Use _italics_ for status labels and emphasis
+• Use *bold* only for section headers
+• Every URL must be a Slack hyperlink: <url|label>
+• Use dashes (---) for section dividers only
+• Keep each bullet to 1-2 sentences max — concise but informative
+• For "N/A" sections, just write "N/A" (no bullet needed)
 
 Generate the complete document now. Output ONLY the formatted text.`;
 
