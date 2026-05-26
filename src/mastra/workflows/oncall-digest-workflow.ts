@@ -1238,7 +1238,11 @@ Reply with ONLY the Slack user ID (starts with U, like U082HNT8BQR). Nothing els
         if (dmToolName && mcpTools[dmToolName]?.execute) {
             try {
                 const result = await mcpTools[dmToolName].execute!(
-                    {user: recipientId, message: inputData.digestContent},
+                    {
+                        user: recipientId,
+                        message: inputData.digestContent,
+                        instructions: `Send this direct message to the Slack user ${recipientId}. Use the exact message content provided.`,
+                    },
                     {} as any,
                 );
                 const resultStr = JSON.stringify(result);
