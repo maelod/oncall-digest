@@ -20,7 +20,7 @@ async function sliteFetch(path: string, options: RequestInit = {}): Promise<any>
     const response = await fetch(`${SLITE_BASE_URL}${path}`, {
         ...options,
         headers: {
-            'Authorization': `Bearer ${apiKey}`,
+            'x-slite-api-key': apiKey,
             'Content-Type': 'application/json',
             'Accept': 'application/json',
             ...options.headers,
@@ -78,7 +78,8 @@ export async function createHandoffNote(title: string, content: string): Promise
             }),
         });
 
-        const noteUrl = note.url || `https://glossgenius.slite.com/app/docs/${note.id}`;
+        // Convert API URL to app URL for human-friendly linking
+        const noteUrl = `https://glossgenius.slite.com/app/docs/${note.id}`;
         console.log(`📝 [slite-api] Created note: ${noteUrl}`);
         return noteUrl;
     } catch (e) {
@@ -95,7 +96,7 @@ export async function createHandoffNote(title: string, content: string): Promise
                     markdown: markdownContent,
                 }),
             });
-            const noteUrl = note.url || `https://glossgenius.slite.com/app/docs/${note.id}`;
+            const noteUrl = `https://glossgenius.slite.com/app/docs/${note.id}`;
             console.log(`📝 [slite-api] Created note (no parent): ${noteUrl}`);
             return noteUrl;
         } catch (e2) {

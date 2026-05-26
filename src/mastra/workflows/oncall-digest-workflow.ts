@@ -1161,7 +1161,7 @@ const createSliteHandoffEntryStep = createStep({
     execute: async ({inputData}) => {
         console.log('📝 [create-slite-handoff] Creating Slite handoff entry via direct API...');
 
-        const title = `Growth On-Call Handoff ${inputData.previousShiftStart} to ${inputData.shiftEnd}`;
+        const title = `Growth On-Call Handoff ${inputData.shiftStart}`;
         // Use direct Slite API — no agent, no Zapier
         const sliteDocUrl = await createHandoffNote(title, inputData.digestContent);
 
@@ -1199,12 +1199,12 @@ const sendSlackDMStep = createStep({
         console.log(`💬 [send-slack-dm] Recipient: ${inputData.recipientSlackId} (${inputData.recipientName})`);
         console.log(`💬 [send-slack-dm] Digest length: ${inputData.digestContent.length} chars`);
 
-        const agent = mastra.getAgent('oncallDigestAgent');
         let recipientId = inputData.recipientSlackId;
 
         // Step 1: If the recipient isn't a Slack user ID (U...), resolve it via Slack search
         if (!recipientId || !recipientId.match(/^U[A-Z0-9]+$/)) {
             console.log(`💬 [send-slack-dm] "${recipientId}" is not a Slack user ID, resolving...`);
+            const agent = mastra.getAgent('oncallDigestAgent');
             const resolvePrompt = `Use the zapier_slack_find_user tool to find the Slack user ID for "${inputData.recipientName || recipientId}".
 
 Search by name: "${inputData.recipientName || recipientId}"
@@ -1225,43 +1225,75 @@ Reply with ONLY the Slack user ID (starts with U, like U082HNT8BQR). Nothing els
             }
         }
 
-        // Step 2: Send the DM via agent with explicit instructions to avoid post_at issues
+        // Step 2: Send via direct MCP tool call — always uses the same tool (consistent sender)
         console.log(`💬 [send-slack-dm] Sending DM to ${recipientId}...`);
 
-        const sendPrompt = `Send a Slack direct message using the zapier_slack_send_direct_message tool.
+        // Find the EXACT direct message tool — always use this one for consistency
+        const dmToolName = Object.keys(mcpTools).find(
+            k => k.toLowerCase().includes('send_direct_message'),
+        );
+        console.log(`💬 [send-slack-dm] Using tool: ${dmToolName || 'NOT FOUND'}`);
+        console.log(`💬 [send-slack-dm] All Slack tools: ${Object.keys(mcpTools).filter(k => k.toLowerCase().includes('slack')).join(', ')}`);
 
-CRITICAL INSTRUCTIONS:
-- Set the "user" parameter to exactly: ${recipientId}
-- Set the "message" parameter to the digest content below
-- Do NOT set "post_at" — leave it out entirely, do not pass empty string or null
-- Do NOT set any optional parameters — only "user" and "message"
+        if (dmToolName && mcpTools[dmToolName]?.execute) {
+            try {
+                const result = await mcpTools[dmToolName].execute!(
+                    {user: recipientId, message: inputData.digestContent},
+                    {} as any,
+                );
+                const resultStr = JSON.stringify(result);
+                console.log(`💬 [send-slack-dm] Tool result: ${resultStr.slice(0, 500)}`);
 
-MESSAGE TO SEND:
-${inputData.digestContent}
+                const hasError = /error|invalid|not_found|insufficient/i.test(resultStr);
+                if (hasError) {
+                    return {
+                        success: false,
+                        message: `Tool returned error: ${resultStr.slice(0, 300)}`,
+                        recipientSlackId: recipientId,
+                    };
+                }
+                return {
+                    success: true,
+                    message: `Sent to ${recipientId} via ${dmToolName}`,
+                    recipientSlackId: recipientId,
+                };
+            } catch (e) {
+                console.error('💬 [send-slack-dm] Direct tool error:', e);
+                return {
+                    success: false,
+                    message: `Direct tool failed: ${e instanceof Error ? e.message : e}`,
+                    recipientSlackId: recipientId,
+                };
+            }
+        }
 
-Call the tool NOW. After calling it, tell me if it succeeded or failed.`;
+        // Fallback: use agent but force it to use ONLY zapier_slack_send_direct_message
+        console.log('💬 [send-slack-dm] Direct tool not found, falling back to agent...');
+        const agent = mastra.getAgent('oncallDigestAgent');
+        const sendPrompt = `You MUST use ONLY the zapier_slack_send_direct_message tool. Do NOT use any other Slack tool.
+
+Parameters:
+- user: ${recipientId}
+- message: (the content below)
+
+Do NOT set post_at or any other optional parameters.
+
+MESSAGE:
+${inputData.digestContent}`;
 
         try {
             const {text} = await agent.generate([{role: 'user', content: sendPrompt}]);
             console.log('💬 [send-slack-dm] Agent response:', text.slice(0, 500));
-
-            const hasError = /error|failed|couldn't|unable|not_found|invalid|validation/i.test(text);
+            const hasError = /error|failed|couldn't|unable|not_found|invalid|validation|insufficient/i.test(text);
             const hasSuccess = /sent|delivered|success/i.test(text) && !hasError;
-
             return {
                 success: hasSuccess,
-                message: hasSuccess
-                    ? `Sent to ${recipientId}`
-                    : `May have failed. Agent said: ${text.slice(0, 300)}`,
+                message: hasSuccess ? `Sent to ${recipientId}` : `May have failed: ${text.slice(0, 300)}`,
                 recipientSlackId: recipientId,
             };
         } catch (e) {
             console.error('💬 [send-slack-dm] Agent error:', e);
-            return {
-                success: false,
-                message: `Failed: ${e}`,
-                recipientSlackId: recipientId,
-            };
+            return {success: false, message: `Failed: ${e}`, recipientSlackId: recipientId};
         }
     },
 });
