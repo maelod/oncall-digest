@@ -4,6 +4,7 @@ import {mcpTools} from '../agents/oncall-digest-agent';
 import {getGrommerceOnCall, getRecentIncidents} from '../utils/rootly-api';
 import {verifyPRs} from '../utils/github-api';
 import {createHandoffNote} from '../utils/slite-api';
+import {sendChannelMessage, sendDirectMessage, findChannelByName, findUserByName} from '../utils/slack-api';
 
 // Growth team services for filtering
 const GROWTH_SERVICES = [
@@ -1177,12 +1178,15 @@ const createSliteHandoffEntryStep = createStep({
 });
 
 // ============================================================================
-// SEND SLACK DM STEP
+// SEND TO SLACK STEP (channel + optional DM, via direct Slack API)
 // ============================================================================
 
-const sendSlackDMStep = createStep({
-    id: 'send-slack-dm',
-    description: 'Sends the digest as a Slack DM',
+// Channel to post the digest to
+const DIGEST_CHANNEL = 'team-grommerce-alerts';
+
+const sendSlackStep = createStep({
+    id: 'send-slack',
+    description: 'Sends the digest to #team-grommerce-alerts via direct Slack API',
     inputSchema: z.object({
         recipientSlackId: z.string(),
         recipientName: z.string(),
@@ -1194,111 +1198,63 @@ const sendSlackDMStep = createStep({
         message: z.string(),
         recipientSlackId: z.string(),
     }),
-    execute: async ({inputData, mastra}) => {
-        console.log('💬 [send-slack-dm] Starting...');
-        console.log(`💬 [send-slack-dm] Recipient: ${inputData.recipientSlackId} (${inputData.recipientName})`);
-        console.log(`💬 [send-slack-dm] Digest length: ${inputData.digestContent.length} chars`);
+    execute: async ({inputData}) => {
+        console.log('💬 [send-slack] Starting...');
+        console.log(`💬 [send-slack] Digest length: ${inputData.digestContent.length} chars`);
 
-        let recipientId = inputData.recipientSlackId;
+        const results: string[] = [];
+        let success = false;
 
-        // Step 1: If the recipient isn't a Slack user ID (U...), resolve it via Slack search
-        if (!recipientId || !recipientId.match(/^U[A-Z0-9]+$/)) {
-            console.log(`💬 [send-slack-dm] "${recipientId}" is not a Slack user ID, resolving...`);
-            const agent = mastra.getAgent('oncallDigestAgent');
-            const resolvePrompt = `Use the zapier_slack_find_user tool to find the Slack user ID for "${inputData.recipientName || recipientId}".
-
-Search by name: "${inputData.recipientName || recipientId}"
-
-Reply with ONLY the Slack user ID (starts with U, like U082HNT8BQR). Nothing else.`;
-
-            try {
-                const {text} = await agent.generate([{role: 'user', content: resolvePrompt}]);
-                const idMatch = text.match(/U[A-Z0-9]{8,}/);
-                if (idMatch) {
-                    recipientId = idMatch[0];
-                    console.log(`💬 [send-slack-dm] Resolved to Slack ID: ${recipientId}`);
-                } else {
-                    console.error(`💬 [send-slack-dm] Could not resolve user. Agent said: ${text.slice(0, 200)}`);
-                }
-            } catch (e) {
-                console.error(`💬 [send-slack-dm] User resolution failed:`, e);
-            }
-        }
-
-        // Step 2: Send via direct MCP tool call — always uses the same tool (consistent sender)
-        console.log(`💬 [send-slack-dm] Sending DM to ${recipientId}...`);
-
-        // Find the EXACT direct message tool — always use this one for consistency
-        const dmToolName = Object.keys(mcpTools).find(
-            k => k.toLowerCase().includes('send_direct_message'),
-        );
-        console.log(`💬 [send-slack-dm] Using tool: ${dmToolName || 'NOT FOUND'}`);
-        console.log(`💬 [send-slack-dm] All Slack tools: ${Object.keys(mcpTools).filter(k => k.toLowerCase().includes('slack')).join(', ')}`);
-
-        if (dmToolName && mcpTools[dmToolName]?.execute) {
-            try {
-                const result = await mcpTools[dmToolName].execute!(
-                    {
-                        instructions: `Send a Slack direct message to user ${recipientId}. The message content is:\n\n${inputData.digestContent}`,
-                        user: recipientId,
-                        message: inputData.digestContent,
-                    },
-                    {} as any,
-                );
-                const resultStr = JSON.stringify(result);
-                console.log(`💬 [send-slack-dm] Tool result: ${resultStr.slice(0, 500)}`);
-
-                const hasError = /error|invalid|not_found|insufficient/i.test(resultStr);
-                if (hasError) {
-                    return {
-                        success: false,
-                        message: `Tool returned error: ${resultStr.slice(0, 300)}`,
-                        recipientSlackId: recipientId,
-                    };
-                }
-                return {
-                    success: true,
-                    message: `Sent to ${recipientId} via ${dmToolName}`,
-                    recipientSlackId: recipientId,
-                };
-            } catch (e) {
-                console.error('💬 [send-slack-dm] Direct tool error:', e);
-                return {
-                    success: false,
-                    message: `Direct tool failed: ${e instanceof Error ? e.message : e}`,
-                    recipientSlackId: recipientId,
-                };
-            }
-        }
-
-        // Fallback: use agent but force it to use ONLY zapier_slack_send_direct_message
-        console.log('💬 [send-slack-dm] Direct tool not found, falling back to agent...');
-        const agent = mastra.getAgent('oncallDigestAgent');
-        const sendPrompt = `You MUST use ONLY the zapier_slack_send_direct_message tool. Do NOT use any other Slack tool.
-
-Parameters:
-- user: ${recipientId}
-- message: (the content below)
-
-Do NOT set post_at or any other optional parameters.
-
-MESSAGE:
-${inputData.digestContent}`;
-
+        // Step 1: Send to #team-grommerce-alerts channel
         try {
-            const {text} = await agent.generate([{role: 'user', content: sendPrompt}]);
-            console.log('💬 [send-slack-dm] Agent response:', text.slice(0, 500));
-            const hasError = /error|failed|couldn't|unable|not_found|invalid|validation|insufficient/i.test(text);
-            const hasSuccess = /sent|delivered|success/i.test(text) && !hasError;
-            return {
-                success: hasSuccess,
-                message: hasSuccess ? `Sent to ${recipientId}` : `May have failed: ${text.slice(0, 300)}`,
-                recipientSlackId: recipientId,
-            };
+            const channelId = await findChannelByName(DIGEST_CHANNEL);
+            if (channelId) {
+                await sendChannelMessage(channelId, inputData.digestContent);
+                results.push(`Posted to #${DIGEST_CHANNEL}`);
+                success = true;
+            } else {
+                results.push(`Channel #${DIGEST_CHANNEL} not found — bot may need to be invited with /invite @oncall_digest`);
+            }
         } catch (e) {
-            console.error('💬 [send-slack-dm] Agent error:', e);
-            return {success: false, message: `Failed: ${e}`, recipientSlackId: recipientId};
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error('💬 [send-slack] Channel send error:', msg);
+            results.push(`Channel error: ${msg}`);
         }
+
+        // Step 2: Also DM the incoming primary on-call person
+        const recipientId = inputData.recipientSlackId;
+        if (recipientId && recipientId.match(/^U[A-Z0-9]+$/)) {
+            try {
+                await sendDirectMessage(recipientId, inputData.digestContent);
+                results.push(`DM sent to ${recipientId}`);
+                success = true;
+            } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                console.error('💬 [send-slack] DM error:', msg);
+                results.push(`DM error: ${msg}`);
+            }
+        } else if (recipientId) {
+            // Try to resolve name to ID
+            try {
+                const user = await findUserByName(inputData.recipientName || recipientId);
+                if (user) {
+                    await sendDirectMessage(user.id, inputData.digestContent);
+                    results.push(`DM sent to ${user.name} (${user.id})`);
+                    success = true;
+                } else {
+                    results.push(`Could not resolve user "${recipientId}" for DM`);
+                }
+            } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                results.push(`DM resolve/send error: ${msg}`);
+            }
+        }
+
+        return {
+            success,
+            message: results.join(' | '),
+            recipientSlackId: recipientId,
+        };
     },
 });
 
@@ -1308,7 +1264,7 @@ ${inputData.digestContent}`;
 
 export const oncallDigestWorkflow = createWorkflow({
     id: 'oncall-digest-workflow',
-    description: 'Generates and sends an on-call handoff digest for Growth team via Slack DM',
+    description: 'Generates and sends an on-call handoff digest for Growth team to #team-grommerce-alerts',
     inputSchema: workflowInputSchema,
     outputSchema: z.object({
         success: z.boolean(),
@@ -1337,6 +1293,6 @@ export const oncallDigestWorkflow = createWorkflow({
     .then(generateDigestStep)
     // Create Slite handoff entry
     .then(createSliteHandoffEntryStep)
-    // Send via Slack
-    .then(sendSlackDMStep)
+    // Send to #team-grommerce-alerts + DM to primary on-call
+    .then(sendSlackStep)
     .commit();
