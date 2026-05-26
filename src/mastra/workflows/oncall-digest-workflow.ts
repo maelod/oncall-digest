@@ -1161,7 +1161,7 @@ const createSliteHandoffEntryStep = createStep({
     execute: async ({inputData}) => {
         console.log('📝 [create-slite-handoff] Creating Slite handoff entry via direct API...');
 
-        const title = `Growth On-Call Handoff ${inputData.shiftStart}`;
+        const title = inputData.shiftStart;
         // Use direct Slite API — no agent, no Zapier
         const sliteDocUrl = await createHandoffNote(title, inputData.digestContent);
 
