@@ -1181,8 +1181,9 @@ const createSliteHandoffEntryStep = createStep({
 // SEND TO SLACK STEP (channel + optional DM, via direct Slack API)
 // ============================================================================
 
-// Channel to post the digest to
-const DIGEST_CHANNEL = 'team-grommerce-alerts';
+// Channel to post the digest to — use SLACK_DIGEST_CHANNEL_ID env var if set,
+// otherwise fall back to looking up by name (which can hit rate limits on large workspaces)
+const DIGEST_CHANNEL_NAME = 'team-grommerce-alerts';
 
 const sendSlackStep = createStep({
     id: 'send-slack',
@@ -1207,13 +1208,17 @@ const sendSlackStep = createStep({
 
         // Step 1: Send to #team-grommerce-alerts channel
         try {
-            const channelId = await findChannelByName(DIGEST_CHANNEL);
+            // Prefer env var to avoid rate-limited channel lookups on large workspaces
+            let channelId = process.env.SLACK_DIGEST_CHANNEL_ID || '';
+            if (!channelId) {
+                channelId = await findChannelByName(DIGEST_CHANNEL_NAME) || '';
+            }
             if (channelId) {
                 await sendChannelMessage(channelId, inputData.digestContent);
-                results.push(`Posted to #${DIGEST_CHANNEL}`);
+                results.push(`Posted to #${DIGEST_CHANNEL_NAME}`);
                 success = true;
             } else {
-                results.push(`Channel #${DIGEST_CHANNEL} not found — bot may need to be invited with /invite @oncall_digest`);
+                results.push(`Channel #${DIGEST_CHANNEL_NAME} not found — set SLACK_DIGEST_CHANNEL_ID in .env or invite bot with /invite @oncall_digest`);
             }
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);

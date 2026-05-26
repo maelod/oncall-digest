@@ -10,7 +10,7 @@
 
 const SLACK_API_BASE = 'https://slack.com/api';
 
-async function slackFetch(method: string, body: Record<string, any>): Promise<any> {
+async function slackFetch(method: string, body: Record<string, any>, retries = 2): Promise<any> {
     const token = process.env.SLACK_BOT_TOKEN;
     if (!token) {
         throw new Error('SLACK_BOT_TOKEN environment variable is not set');
@@ -27,6 +27,13 @@ async function slackFetch(method: string, body: Record<string, any>): Promise<an
 
     const data = await response.json();
     if (!data.ok) {
+        // Retry on rate limit
+        if (data.error === 'ratelimited' && retries > 0) {
+            const retryAfter = parseInt(response.headers.get('Retry-After') || '3', 10);
+            console.log(`💬 [slack-api] Rate limited on ${method}, retrying in ${retryAfter}s...`);
+            await new Promise(r => setTimeout(r, retryAfter * 1000));
+            return slackFetch(method, body, retries - 1);
+        }
         throw new Error(`Slack API error (${method}): ${data.error}`);
     }
     return data;
