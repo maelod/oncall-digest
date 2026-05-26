@@ -41,6 +41,8 @@ async function sliteFetch(path: string, options: RequestInit = {}): Promise<any>
  */
 function slackToMarkdown(text: string): string {
     return text
+        // Strip the ON-CALL HANDOFF header block (only needed in Slack, not Slite)
+        .replace(/---\n\*ON-CALL HANDOFF\*[^\n]*\n[^\n]*\n---\n?/g, '')
         // Slack bold *text* → markdown **text**
         .replace(/(?<!\w)\*([^*]+)\*(?!\w)/g, '**$1**')
         // Slack italic _text_ → markdown *text*
